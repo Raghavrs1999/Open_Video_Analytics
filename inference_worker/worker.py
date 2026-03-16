@@ -44,6 +44,7 @@ from ultralytics import YOLO
 import redis
 
 from config import settings
+from spatial_engine import SpatialEngine
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -205,6 +206,7 @@ def run():
 
     det_channel   = f"detections:{settings.session_id}"
     frame_channel = f"frames:{settings.session_id}"
+    alert_channel = f"alerts:{settings.session_id}"
     meta_key      = f"meta:{settings.session_id}"
 
     # --- Load Model ---
@@ -220,6 +222,20 @@ def run():
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
     model(dummy, verbose=False)
     logger.info("Model '%s' warmed up on %s", settings.model_name, device)
+
+    # --- Spatial Risk Engine ---
+    spatial_engine = SpatialEngine(
+        zones_cfg=settings.zones_config,
+        tripwires_cfg=settings.tripwires_config,
+    )
+    has_spatial = bool(settings.zones_config or settings.tripwires_config)
+    if has_spatial:
+        logger.info(
+            "Spatial Risk Engine active: %d zone(s), %d tripwire(s)",
+            len(settings.zones_config), len(settings.tripwires_config),
+        )
+    else:
+        logger.info("Spatial Risk Engine: no zones/tripwires configured (pass ZONES_CONFIG / TRIPWIRES_CONFIG env vars to enable).")
 
     # Publish session metadata to Redis
     meta = {
@@ -315,6 +331,18 @@ def run():
                 orig_h=orig_h,
             )
 
+            # --- Spatial Risk Engine ---
+            alerts = []
+            if has_spatial and detections:
+                raw_alerts = spatial_engine.evaluate(frame_id, detections)
+                alerts = [a.to_dict() for a in raw_alerts]
+                # Publish each alert individually for low-latency UI updates
+                for alert_dict in alerts:
+                    try:
+                        r.publish(alert_channel, json.dumps(alert_dict))
+                    except Exception as exc:
+                        logger.warning("Failed to publish alert: %s", exc)
+
         except Exception as exc:
             logger.error("Inference error on frame %d: %s", frame_id, exc)
             loop_stats["errors"] += 1
@@ -329,6 +357,7 @@ def run():
             "frame_width":  orig_w,
             "frame_height": orig_h,
             "detections":   detections,
+            "alerts":       alerts,   # empty list when no spatial rules fired
         }
         try:
             r.publish(det_channel, json.dumps(payload))

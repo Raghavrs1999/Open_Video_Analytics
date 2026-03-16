@@ -31,7 +31,20 @@ import asyncio
 import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, Set, Optional
+from typing import Any, Dict, List, Optional, Set
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    HAS_PYNVML = True
+except Exception:
+    HAS_PYNVML = False
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
@@ -77,13 +90,16 @@ logger = logging.getLogger("gateway")
 # session_id → set of WebSocket connections
 ws_clients: Dict[str, Set[WebSocket]] = {}
 
-# session_id → asyncio.Task (Redis subscriber)
+# session_id → asyncio.Task (Redis subscriber: detections + alerts)
 subscriber_tasks: Dict[str, asyncio.Task] = {}
 
 # session_id → subprocess.Popen (worker process)
 worker_processes: Dict[str, subprocess.Popen] = {}
 
 redis_client: Optional[aioredis.Redis] = None
+
+# Background telemetry task
+_telemetry_task: Optional[asyncio.Task] = None
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +108,7 @@ redis_client: Optional[aioredis.Redis] = None
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    global redis_client
+    global redis_client, _telemetry_task
     logger.info("Connecting to Redis: %s", cfg.redis_url)
     redis_client = aioredis.from_url(cfg.redis_url, decode_responses=False)
     try:
@@ -101,10 +117,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("Redis connection failed: %s  — continuing without Redis.", exc)
 
+    # Start system telemetry broadcast
+    _telemetry_task = asyncio.create_task(_telemetry_loop())
+
     yield
 
-    # Shutdown: cancel subscriber tasks and kill worker processes
+    # Shutdown
     logger.info("Shutting down gateway …")
+    if _telemetry_task:
+        _telemetry_task.cancel()
     for task in subscriber_tasks.values():
         task.cancel()
     for proc in worker_processes.values():
@@ -148,6 +169,8 @@ class StartSessionRequest(BaseModel):
     confidence: float = 0.25
     target_fps: int = 30
     publish_frames: bool = True
+    zones_config: List[Any] = []
+    tripwires_config: List[Any] = []
 
 
 # ---------------------------------------------------------------------------
@@ -156,49 +179,128 @@ class StartSessionRequest(BaseModel):
 
 async def _redis_subscriber(session_id: str):
     """
-    Subscribe to Redis detections:{session_id} and push each message
-    to all WebSocket clients connected for that session.
+    Subscribe to Redis detections:{session_id} AND alerts:{session_id}.
+    Pushes detection payloads and structured alert events to WebSocket clients.
     """
-    channel = f"detections:{session_id}"
-    logger.info("Starting Redis subscriber for channel: %s", channel)
+    det_channel   = f"detections:{session_id}"
+    alert_channel = f"alerts:{session_id}"
+    logger.info("Starting Redis subscriber for: %s, %s", det_channel, alert_channel)
+
+    async def _broadcast(data: bytes):
+        clients = ws_clients.get(session_id, set()).copy()
+        dead: Set[WebSocket] = set()
+        for ws in clients:
+            try:
+                await ws.send_text(data.decode("utf-8") if isinstance(data, bytes) else data)
+            except Exception:
+                dead.add(ws)
+        ws_clients[session_id] -= dead
 
     try:
         pubsub = redis_client.pubsub()
-        await pubsub.subscribe(channel)
+        await pubsub.subscribe(det_channel, alert_channel)
 
         async for message in pubsub.listen():
             if message["type"] != "message":
                 continue
-            clients = ws_clients.get(session_id, set()).copy()
-            if not clients:
-                continue
-            data = message["data"]
-            # Broadcast to all connected clients for this session
-            dead: Set[WebSocket] = set()
-            for ws in clients:
+            raw  = message["data"]
+            chan = message["channel"]
+            if isinstance(chan, bytes):
+                chan = chan.decode()
+
+            if chan == alert_channel:
+                # Wrap alert with envelope so frontend can distinguish
                 try:
-                    if isinstance(data, bytes):
-                        await ws.send_text(data.decode("utf-8"))
-                    else:
-                        await ws.send_text(data)
+                    alert_dict = json.loads(raw)
+                    envelope   = json.dumps({"type": "alert", "data": alert_dict})
+                    await _broadcast(envelope.encode())
                 except Exception:
-                    dead.add(ws)
-            ws_clients[session_id] -= dead
+                    pass
+            else:
+                await _broadcast(raw)
+
     except asyncio.CancelledError:
         logger.info("Subscriber task cancelled for session: %s", session_id)
     except Exception as exc:
         logger.error("Subscriber error for session %s: %s", session_id, exc)
     finally:
         try:
-            await pubsub.unsubscribe(channel)
+            await pubsub.unsubscribe(det_channel, alert_channel)
             await pubsub.aclose()
         except Exception:
             pass
 
+# ---------------------------------------------------------------------------
+# System Telemetry
+# ---------------------------------------------------------------------------
+
+def _get_system_stats() -> dict:
+    stats: dict = {"timestamp": time.time()}
+    if HAS_PSUTIL:
+        stats["cpu_percent"]  = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        stats["ram_used_gb"]  = round(mem.used  / 1024**3, 2)
+        stats["ram_total_gb"] = round(mem.total / 1024**3, 2)
+        stats["ram_percent"]  = mem.percent
+    if HAS_PYNVML:
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            util   = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            mem_i  = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            stats["gpu_name"]       = pynvml.nvmlDeviceGetName(handle)
+            stats["gpu_percent"]    = util.gpu
+            stats["gpu_mem_used_gb"]  = round(mem_i.used  / 1024**3, 2)
+            stats["gpu_mem_total_gb"] = round(mem_i.total / 1024**3, 2)
+        except Exception:
+            pass
+    return stats
+
+
+async def _telemetry_loop():
+    """Broadcast system telemetry to Redis telemetry:system every second."""
+    channel = "telemetry:system"
+    while True:
+        try:
+            await asyncio.sleep(1)
+            if not redis_client:
+                continue
+            stats = _get_system_stats()
+            await redis_client.publish(channel, json.dumps({"type": "telemetry", "data": stats}))
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug("Telemetry publish error: %s", exc)
+
+
+@app.get("/telemetry/system", tags=["Meta"])
+async def get_telemetry():
+    """One-shot system stats snapshot (CPU, RAM, GPU)."""
+    return _get_system_stats()
+
 
 # ---------------------------------------------------------------------------
-# Endpoints — Health & Info
+# WebSocket — Telemetry (optional dedicated channel)
 # ---------------------------------------------------------------------------
+
+@app.websocket("/ws/telemetry")
+async def ws_telemetry(websocket: WebSocket):
+    """Dedicated WebSocket for system telemetry — subscribes to Redis telemetry:system."""
+    await websocket.accept()
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe("telemetry:system")
+    try:
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            data = message["data"]
+            await websocket.send_text(data.decode() if isinstance(data, bytes) else data)
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        await pubsub.unsubscribe("telemetry:system")
+        await pubsub.aclose()
+
+
 
 @app.get("/health", tags=["Meta"])
 async def health():
@@ -267,14 +369,16 @@ async def start_session(req: StartSessionRequest, background_tasks: BackgroundTa
 
     env = {
         **os.environ,
-        "SESSION_ID":      req.session_id,
-        "VIDEO_SOURCE":    req.video_source,
-        "MODEL_NAME":      req.model_name,
-        "CONFIDENCE":      str(req.confidence),
-        "TARGET_FPS":      str(req.target_fps),
-        "PUBLISH_FRAMES":  str(req.publish_frames).lower(),
-        "REDIS_URL":       cfg.redis_url,
-        "MODEL_DIR":       str(Path(cfg.model_dir).resolve()),
+        "SESSION_ID":        req.session_id,
+        "VIDEO_SOURCE":      req.video_source,
+        "MODEL_NAME":        req.model_name,
+        "CONFIDENCE":        str(req.confidence),
+        "TARGET_FPS":        str(req.target_fps),
+        "PUBLISH_FRAMES":    str(req.publish_frames).lower(),
+        "REDIS_URL":         cfg.redis_url,
+        "MODEL_DIR":         str(Path(cfg.model_dir).resolve()),
+        "ZONES_CONFIG":      json.dumps(req.zones_config),
+        "TRIPWIRES_CONFIG":  json.dumps(req.tripwires_config),
     }
 
     proc = subprocess.Popen(

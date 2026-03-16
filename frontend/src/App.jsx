@@ -8,10 +8,11 @@
  */
 
 import './index.css'
-import ControlPanel from './components/ControlPanel'
-import VideoPlayer  from './components/VideoPlayer'
-import AlertFeed    from './components/AlertFeed'
-import { useStore } from './store'
+import ControlPanel          from './components/ControlPanel'
+import VideoPlayer           from './components/VideoPlayer'
+import AlertFeed             from './components/AlertFeed'
+import SystemTelemetryStrip  from './components/SystemTelemetryStrip'
+import { useStore }          from './store'
 
 function Header() {
   const wsStatus   = useStore((s) => s.wsStatus)
@@ -82,6 +83,9 @@ export default function App() {
           <AlertFeed />
         </aside>
       </div>
+
+      {/* ── Telemetry strip ── */}
+      <SystemTelemetryStrip />
     </div>
   )
 }

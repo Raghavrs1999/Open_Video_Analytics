@@ -5,6 +5,9 @@ All settings are sourced from environment variables or a .env file.
 Copy .env.example to .env and adjust values for your setup.
 """
 
+import json
+from typing import Any, List
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,15 +62,15 @@ class WorkerConfig(BaseSettings):
     session_id: str = "default"
     """
     Unique identifier for this worker session.
-    The gateway subscribes to channels named: detections:{session_id} and frames:{session_id}.
+    The gateway subscribes to channels: detections:{session_id}, frames:{session_id},
+    and alerts:{session_id}.
     """
 
     # --- Output ---
     publish_frames: bool = True
     """
     If True, compress each frame to JPEG and publish to Redis frames channel.
-    Disable if bandwidth between worker and Redis is limited; the gateway will
-    then relay inference results only (no MJPEG stream).
+    Disable if bandwidth between worker and Redis is limited.
     """
 
     jpeg_quality: int = 70
@@ -78,6 +81,48 @@ class WorkerConfig(BaseSettings):
 
     # --- Logging ---
     log_level: str = "INFO"
+
+    # ── Spatial Risk Engine ───────────────────────────────────────────────
+    zones_config: List[Any] = []
+    """
+    List of restricted zone definitions (JSON).
+    Set via ZONES_CONFIG env var as a JSON string, e.g.:
+    [
+      {
+        "name": "Restricted Zone A",
+        "vertices": [[100,200],[400,200],[400,500],[100,500]],
+        "allowed_classes": ["person"],
+        "warning_secs": 5,
+        "critical_secs": 15
+      }
+    ]
+    Leave empty [] to disable zone detection.
+    """
+
+    tripwires_config: List[Any] = []
+    """
+    List of tripwire definitions (JSON).
+    Set via TRIPWIRES_CONFIG env var as a JSON string, e.g.:
+    [
+      {
+        "name": "Entry Gate",
+        "point1": [320, 0],
+        "point2": [320, 720],
+        "in_direction": "left",
+        "allowed_classes": ["person", "car"],
+        "cooldown_secs": 2
+      }
+    ]
+    Leave empty [] to disable tripwire detection.
+    """
+
+    @field_validator("zones_config", "tripwires_config", mode="before")
+    @classmethod
+    def parse_json_list(cls, v: Any) -> List[Any]:
+        """Allow the field to be set as a JSON string (from env var)."""
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
 
 
 settings = WorkerConfig()
