@@ -82,6 +82,31 @@ class WorkerConfig(BaseSettings):
     # --- Logging ---
     log_level: str = "INFO"
 
+    # ── Phase 2: MediaMTX Video Transport ────────────────────────────────────
+    mediamtx_url: str = ""
+    """
+    RTSP push URL for MediaMTX. When set, annotated frames are pushed via
+    an ffmpeg subprocess to this URL.
+    Example: rtsp://localhost:8554/default
+    Template: rtsp://mediamtx:8554/{session_id}  (Docker Compose)
+    Leave empty to disable RTSP push (falls back to Redis MJPEG relay).
+    """
+
+    hls_base_url: str = ""
+    """
+    Base URL of the MediaMTX HLS server exposed to the browser.
+    Example: http://localhost:8888
+    The full HLS playlist URL will be: {hls_base_url}/{session_id}/index.m3u8
+    Used by the gateway to tell the frontend where to load the stream.
+    """
+
+    draw_boxes_on_stream: bool = True
+    """
+    If True, YOLO bounding boxes and labels are drawn directly onto the frames
+    pushed to MediaMTX (boxes are burned into the HLS video).
+    Set False to push clean frames and rely solely on the canvas overlay.
+    """
+
     # ── Spatial Risk Engine ───────────────────────────────────────────────
     zones_config: List[Any] = []
     """

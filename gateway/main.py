@@ -67,6 +67,7 @@ class GatewayConfig(BaseSettings):
     model_dir: str = "../models"
     log_level: str = "INFO"
     cors_origins: str = "*"
+    mediamtx_hls_url: str = ""  # e.g. http://localhost:8888 (exposed to browser)
 
 
 cfg = GatewayConfig()
@@ -509,9 +510,33 @@ async def mjpeg_stream(session_id: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+@app.get("/video/{session_id}/hls_url", tags=["Video"])
+async def get_hls_url(session_id: str):
+    """
+    Returns the HLS playlist URL for a session.
+    Reads the hls_url stored in Redis session metadata by the worker.
+    Falls back to constructing from MEDIAMTX_HLS_URL gateway config.
+    """
+    # Try reading from Redis meta (written by worker)
+    hls_url = ""
+    try:
+        raw = await redis_client.get(f"meta:{session_id}")
+        if raw:
+            meta = json.loads(raw)
+            hls_url = meta.get("hls_url", "")
+    except Exception:
+        pass
+
+    # Fallback: construct from gateway config
+    if not hls_url and cfg.mediamtx_hls_url:
+        hls_url = f"{cfg.mediamtx_hls_url}/{session_id}/index.m3u8"
+
+    if not hls_url:
+        return {"hls_url": "", "available": False,
+                "message": "MediaMTX not configured. Set MEDIAMTX_HLS_URL env var."}
+
+    return {"hls_url": hls_url, "available": True, "session_id": session_id}
+
 
 if __name__ == "__main__":
     import uvicorn

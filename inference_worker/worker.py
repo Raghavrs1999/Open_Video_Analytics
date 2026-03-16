@@ -29,6 +29,7 @@ import signal
 import logging
 import datetime
 import numpy as np
+from typing import Optional
 from pathlib import Path
 
 import torch
@@ -45,6 +46,7 @@ import redis
 
 from config import settings
 from spatial_engine import SpatialEngine
+from rtsp_writer import RtspWriter
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -189,8 +191,31 @@ def extract_detections(results, model_names, offset_x=0.0, offset_y=0.0,
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Draw detections onto frame (for MediaMTX stream)
 # ---------------------------------------------------------------------------
+
+def draw_detections_on_frame(frame: np.ndarray, detections: list) -> np.ndarray:
+    """
+    Draws bounding boxes, track IDs, and class labels directly onto `frame`.
+    Used to burn annotations into the MediaMTX/HLS stream.
+    """
+    COLORS = [
+        (0, 212, 255), (0, 255, 136), (255, 215, 0), (255, 68, 102),
+        (168, 85, 247), (249, 115, 22), (20, 184, 166), (236, 72, 153),
+    ]
+    for det in detections:
+        x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
+        cls  = det["class_id"] % len(COLORS)
+        col  = COLORS[cls]
+        tid  = det["track_id"]
+        lbl  = f"{det['class_name']} #{tid}  {det['confidence']:.0%}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
+        label_y = max(y1 - 6, 12)
+        cv2.putText(frame, lbl, (x1, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+    return frame
+
+
 
 def run():
     global _running
@@ -237,14 +262,27 @@ def run():
     else:
         logger.info("Spatial Risk Engine: no zones/tripwires configured (pass ZONES_CONFIG / TRIPWIRES_CONFIG env vars to enable).")
 
+    # --- Phase 2: RTSP Writer (MediaMTX) ---
+    rtsp_writer: Optional[RtspWriter] = None
+    use_rtsp = bool(settings.mediamtx_url)
+    if use_rtsp:
+        logger.info("Phase 2 mode: RTSP push enabled → %s", settings.mediamtx_url)
+    else:
+        logger.info("Phase 2 mode: RTSP push disabled (set MEDIAMTX_URL to enable). Using Redis MJPEG relay.")
+
     # Publish session metadata to Redis
     meta = {
         "session_id":  settings.session_id,
         "model_name":  settings.model_name,
-        "model_names": model.names,  # {0: 'person', ...}
+        "model_names": model.names,
         "device":      device,
         "started_at":  datetime.datetime.now().isoformat(),
         "status":      "running",
+        "hls_url":     (
+            f"{settings.hls_base_url}/{settings.session_id}/index.m3u8"
+            if settings.hls_base_url else ""
+        ),
+        "rtsp_url":    settings.mediamtx_url,
     }
     r.set(meta_key, json.dumps(meta))
 
@@ -365,7 +403,22 @@ def run():
             logger.warning("Failed to publish detections: %s", exc)
             loop_stats["publish_errors"] += 1
 
-        # --- Publish raw frame (MJPEG relay) ---
+            # --- Phase 2: RTSP push to MediaMTX ---
+            if use_rtsp:
+                # Lazy-init on first real frame (we now know orig_w/orig_h)
+                if rtsp_writer is None:
+                    rtsp_writer = RtspWriter(
+                        rtsp_url=settings.mediamtx_url,
+                        width=orig_w,
+                        height=orig_h,
+                        fps=settings.target_fps,
+                    )
+                # Optionally burn bboxes into the stream
+                stream_frame = frame.copy() if settings.draw_boxes_on_stream else frame
+                if settings.draw_boxes_on_stream and detections:
+                    draw_detections_on_frame(stream_frame, detections)
+                rtsp_writer.write(stream_frame)
+
         if settings.publish_frames:
             try:
                 ok, buf = cv2.imencode(
@@ -401,6 +454,8 @@ def run():
     # -----------------------------------------------------------------------
     logger.info("Stopping — releasing resources …")
     cap.release()
+    if rtsp_writer:
+        rtsp_writer.close()
     r.set(meta_key, json.dumps({**meta, "status": "stopped"}))
     r.close()
     logger.info("Worker stopped cleanly. Total frames: %d", loop_stats["frames"])

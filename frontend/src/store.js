@@ -52,6 +52,9 @@ export const useStore = create((set, get) => ({
   telemetry:  null,
   _telemetryWs: null,
 
+  // ── Phase 2: HLS stream URL ───────────────────────────────────────────────
+  hlsUrl: '',
+
   // ── UI state ─────────────────────────────────────────────────────────────
   showLabels: true,
 
@@ -73,8 +76,12 @@ export const useStore = create((set, get) => ({
     set({ wsStatus: 'connecting', sessionId })
     const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}`)
 
-    ws.onopen    = () => set({ wsStatus: 'connected', _ws: ws })
-    ws.onclose   = () => set({ wsStatus: 'disconnected', _ws: null })
+    ws.onopen    = () => {
+      set({ wsStatus: 'connected', _ws: ws })
+      // Fetch HLS URL when connected (MediaMTX may not be ready immediately)
+      setTimeout(() => get().fetchHlsUrl(sessionId), 2000)
+    }
+    ws.onclose   = () => set({ wsStatus: 'disconnected', _ws: null, hlsUrl: '' })
     ws.onerror   = () => set({ wsStatus: 'error', _ws: null })
     ws.onmessage = (evt) => {
       try { get()._handleMessage(JSON.parse(evt.data)) }
@@ -88,7 +95,19 @@ export const useStore = create((set, get) => ({
   disconnect: () => {
     const { _ws } = get()
     if (_ws) _ws.close()
-    set({ wsStatus: 'disconnected', _ws: null, detections: [], frameId: 0 })
+    set({ wsStatus: 'disconnected', _ws: null, detections: [], frameId: 0, hlsUrl: '' })
+  },
+
+  // ── Fetch HLS URL from gateway ────────────────────────────────────────────
+  fetchHlsUrl: async (sessionId) => {
+    try {
+      const url  = get().gatewayUrl
+      const res  = await fetch(`${url}/video/${sessionId}/hls_url`)
+      const data = await res.json()
+      if (data.available && data.hls_url) {
+        set({ hlsUrl: data.hls_url })
+      }
+    } catch (_) {}
   },
 
   // ── Connect telemetry WebSocket ───────────────────────────────────────────

@@ -1,0 +1,51 @@
+###############################################################################
+# MediaMTX Configuration
+# Open Video Analytics — Phase 2 Video Transport
+###############################################################################
+
+# ── Logging ───────────────────────────────────────────────────────────────
+logLevel: info
+logDestinations: [stdout]
+
+# ── API / Dashboard (http://localhost:9997) ───────────────────────────────
+api: yes
+apiAddress: :9997
+
+# ── RTSP server (workers push here) ──────────────────────────────────────
+rtsp: yes
+rtspAddress: :8554
+protocols: [tcp]           # TCP-only for reliability inside Docker networks
+rtspEncryption: no
+
+# ── HLS server (browser pulls from here) ─────────────────────────────────
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes         # always remux incoming stream to HLS
+hlsSegmentDuration: 1s      # 1-second segments → ~2-3s end-to-end latency
+hlsPartDuration: 200ms      # Low-Latency HLS part duration
+hlsSegmentMaxSize: 50MB
+hlsAllowOrigin: "*"         # CORS — allow React dev server + production origins
+
+# ── WebRTC (future — leave enabled for free upgrade path) ────────────────
+webrtc: yes
+webrtcAddress: :8889
+webrtcICEServers2: []       # no STUN/TURN needed on LAN
+
+# ── RTMP (disabled) ───────────────────────────────────────────────────────
+rtmp: no
+srt: no
+
+# ── Path defaults — wildcard accepts any session_id ───────────────────────
+pathDefaults:
+  source: publisher          # accept publishers (workers)
+  sourceOnDemand: no
+  publishUser: ""            # no auth for internal Docker network
+  publishPass: ""
+  readUser: ""
+  readPass: ""
+  overridePublisher: yes     # new publisher replaces crashed old one
+
+# ── Named paths (add per-session overrides here if needed) ───────────────
+paths:
+  "~^[a-zA-Z0-9_-]+$":      # matches any alphanumeric session_id
+    {}
