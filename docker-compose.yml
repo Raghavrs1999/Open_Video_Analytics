@@ -1,0 +1,68 @@
+services:
+  # ── Redis — message broker ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── Gateway — FastAPI WebSocket server ────────────────────────────────
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - WORKER_SCRIPT=/app/worker/worker.py
+      - MODEL_DIR=/app/models
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./models:/app/models:ro
+      - ./inference_worker:/app/worker:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Inference Worker — YOLO GPU inference ─────────────────────────────
+  # NOTE: Override VIDEO_SOURCE and MODEL_NAME in your .env file.
+  worker:
+    build:
+      context: ./inference_worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - VIDEO_SOURCE=${VIDEO_SOURCE:-0}
+      - MODEL_NAME=${MODEL_NAME:-yolov8n}
+      - SESSION_ID=${SESSION_ID:-default}
+      - REDIS_URL=redis://redis:6379
+      - MODEL_DIR=/app/models
+      - CONFIDENCE=${CONFIDENCE:-0.25}
+      - TARGET_FPS=${TARGET_FPS:-30}
+      - PUBLISH_FRAMES=${PUBLISH_FRAMES:-true}
+    volumes:
+      - ./models:/app/models:ro
+    # Uncomment to enable GPU access (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis_data:

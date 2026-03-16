@@ -1,0 +1,8 @@
+# Gateway Dependencies
+# pip install -r requirements.txt
+
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+redis[asyncio]>=5.0.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.6

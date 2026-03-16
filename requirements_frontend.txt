@@ -1,0 +1,10 @@
+# Frontend (Streamlit Dashboard) Dependencies
+# Install with: pip install -r requirements_frontend.txt
+
+streamlit>=1.34.0
+streamlit-image-coordinates>=0.1.6
+httpx>=0.25.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+pandas>=2.0.0
+pyyaml>=6.0.0

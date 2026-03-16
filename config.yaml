@@ -1,0 +1,54 @@
+# ============================================================
+# Backend Worker Configuration
+# ============================================================
+# Register your GPU backend workers here.
+# Each entry maps a URL to a YOLO model name.
+#
+# - url:   The HTTP address of the backend_worker.py server
+# - model: Model name (must match the .pt filename in the worker's models/ dir)
+# - name:  Friendly label shown in the dashboard
+#
+# You can run multiple workers on different machines, each
+# serving a different model. The frontend will fan out frames
+# to all backends matching the selected operation.
+# ============================================================
+
+backends:
+  # CCTV / General Detection
+  - url: "http://localhost:8000"
+    model: "yolo26n"
+    name: "local-gpu"
+
+  # Uncomment and configure additional backends as needed:
+  #
+  # - url: "http://192.168.1.100:8000"
+  #   model: "ppe_kit"
+  #   name: "gpu-2"
+  #
+  # # Pano
+  # - url: "http://192.168.1.101:8000"
+  #   model: "yolov8n"
+  #   name: "gpu-3"
+  #
+  # # Ortho / Aerial
+  # - url: "http://192.168.1.102:8000"
+  #   model: "vis_weights"
+  #   name: "gpu-4"
+  #
+  # - url: "http://192.168.1.102:8000"
+  #   model: "yolov8l-obb"
+  #   name: "gpu-4-obb"
+  #
+  # - url: "http://192.168.1.103:8000"
+  #   model: "solar"
+  #   name: "gpu-5"
+  #
+  # # Dashcam
+  # - url: "http://192.168.1.104:8000"
+  #   model: "tsdr_best_2025_v11"
+  #   name: "gpu-6"
+
+buffer_size: 300              # Playback buffer size (frames) — larger = smoother but more latency
+target_fps: 30                # Target processing frame rate
+inactivity_timeout_mins: 30   # Backend session auto-cleanup after N minutes of inactivity
+re_entry_cooldown: 30         # Frames to wait before re-counting the same object crossing a line
